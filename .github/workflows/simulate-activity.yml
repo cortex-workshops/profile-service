@@ -13,6 +13,7 @@ permissions:
 jobs:
   simulate:
     runs-on: ubuntu-latest
+    timeout-minutes: 360   # allow time for delayed reviews/approvals
 
     env:
       # --- Mirror all candidate secrets into env so bash can pick dynamically ---
@@ -38,6 +39,12 @@ jobs:
       REVIEWER_CANDIDATES: |
         ["PAT_TAYLOR","PAT_CATHLEEN","PAT_SALLY","PAT_JEFF","PAT_STEPH","PAT_CHASE","PAT_MARION","PAT_ROSHNI","PAT_GIANPAUL"]
 
+      # --- Delay tuning (minutes) for non-zero time-to-first-review/approval ---
+      FIRST_REVIEW_MIN: "10"
+      FIRST_REVIEW_MAX: "80"
+      APPROVAL_MIN: "8"
+      APPROVAL_MAX: "120"
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -45,17 +52,33 @@ jobs:
       - name: Install tools
         run: sudo apt-get update -y && sudo apt-get install -y jq
 
-      - name: Pick one random actor (from Web Team)
+      # Prefer actors with tokens actually available to this repo
+      - name: Pick one random actor (only from tokens available)
         id: pick
         shell: bash
         run: |
+          eligible=()
           len=$(jq 'length' <<< "${ACTORS}")
           if [ "$len" -eq 0 ]; then
-            echo "chosen=" >> $GITHUB_OUTPUT
+            echo "pat_secret=" >> $GITHUB_OUTPUT
             exit 0
           fi
-          idx=$((RANDOM % len))
-          obj=$(jq -r ".[$idx]" <<< "${ACTORS}")
+          for i in $(seq 0 $((len-1))); do
+            obj=$(jq -r ".[$i]" <<< "${ACTORS}")
+            sec=$(jq -r '.pat_secret' <<< "$obj")   # e.g., PAT_CHASE
+            tok_var="S_${sec}"                      # e.g., S_PAT_CHASE
+            tok="${!tok_var}"
+            [ -n "$tok" ] && eligible+=("$i")
+          done
+
+          if [ "${#eligible[@]}" -eq 0 ]; then
+            echo "No eligible actors: no S_PAT_* env present for this repo."
+            echo "pat_secret=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          pick_idx="${eligible[$((RANDOM % ${#eligible[@]}))]}"
+          obj=$(jq -r ".[$pick_idx]" <<< "${ACTORS}")
           echo "username=$(jq -r '.username' <<< "$obj")"   >> $GITHUB_OUTPUT
           echo "git_name=$(jq -r '.git_name' <<< "$obj")"   >> $GITHUB_OUTPUT
           echo "git_email=$(jq -r '.git_email' <<< "$obj")" >> $GITHUB_OUTPUT
@@ -75,7 +98,7 @@ jobs:
           TOKEN="${!TOKEN_VAR}"
 
           if [ -z "$TOKEN" ]; then
-            echo "Secret $PAT_SECRET is not available to this repo; skipping."
+            echo "Secret $PAT_SECRET not available to this repo; skipping."
             echo "skip=true" >> $GITHUB_OUTPUT
             exit 0
           fi
@@ -84,7 +107,6 @@ jobs:
           echo "GH_TOKEN=$TOKEN" >> $GITHUB_ENV
           echo "AUTHOR=${{ steps.pick.outputs.git_name }}" >> $GITHUB_ENV
           echo "EMAIL=${{ steps.pick.outputs.git_email }}" >> $GITHUB_ENV
-          # Initial branch suggestion; can be overridden below if we reuse an existing branch
           echo "BRANCH=sim/${{ steps.pick.outputs.username }}-$(date +%s)" >> $GITHUB_ENV
 
       - name: Stop if no actor token
@@ -107,7 +129,6 @@ jobs:
               break
             fi
           done
-          echo "Scenario: ${{ steps.scenario.outputs.value }}"
 
       - name: Commit change (README preferred; vary size)
         if: steps.auth.outputs.skip != 'true'
@@ -182,12 +203,21 @@ jobs:
             echo "number=$NUM" >> $GITHUB_OUTPUT
           fi
 
-      - name: Maybe add a PR comment
+      - name: Decide review/approval delays
+        id: delays
         if: steps.auth.outputs.skip != 'true' && steps.pr.outputs.number
+        shell: bash
         run: |
-          if [ $((RANDOM % 2)) -eq 0 ]; then
-            gh pr comment ${{ steps.pr.outputs.number }} --body "General comment by ${AUTHOR} at $(date -u)"
-          fi
+          rr() { local lo="$1" hi="$2"; echo $(( lo + RANDOM % (hi - lo + 1) )); }
+          FR_MIN=${FIRST_REVIEW_MIN:-10}
+          FR_MAX=${FIRST_REVIEW_MAX:-80}
+          AP_MIN=${APPROVAL_MIN:-8}
+          AP_MAX=${APPROVAL_MAX:-120}
+          FIRST_REVIEW_DELAY=$(rr "$FR_MIN" "$FR_MAX")
+          APPROVAL_DELAY=$(rr "$AP_MIN" "$AP_MAX")
+          echo "first_review_minutes=$FIRST_REVIEW_DELAY" >> $GITHUB_OUTPUT
+          echo "approval_minutes=$APPROVAL_DELAY" >> $GITHUB_OUTPUT
+          echo "First review in ~${FIRST_REVIEW_DELAY}m; approval in ~${APPROVAL_DELAY}m"
 
       - name: Pick reviewer secret name
         id: pick_reviewer
@@ -206,14 +236,18 @@ jobs:
           done
           echo "secret=$chosen" >> $GITHUB_OUTPUT
 
-      - name: Leave review as reviewer
+      - name: Wait, then leave first review (COMMENT)
         if: steps.auth.outputs.skip != 'true' && steps.pr.outputs.number && steps.pick_reviewer.outputs.secret
         shell: bash
         run: |
+          mins=${{ steps.delays.outputs.first_review_minutes }}
+          echo "Sleeping ${mins} minutes before first review..."
+          sleep $(( mins * 60 ))
+
           tok_var="S_${{ steps.pick_reviewer.outputs.secret }}"
           REVIEWER_TOKEN="${!tok_var}"
           if [ -z "$REVIEWER_TOKEN" ]; then
-            echo "No reviewer token available; skipping review."
+            echo "No reviewer token available; skipping first review."
             exit 0
           fi
 
@@ -221,27 +255,93 @@ jobs:
           unset GH_TOKEN
 
           echo "$REVIEWER_TOKEN" | gh auth login --with-token
-          kinds=("COMMENT" "COMMENT" "APPROVE")
-          k=${kinds[$RANDOM % ${#kinds[@]}]}
-          if [ "$k" = "APPROVE" ]; then
-            gh pr review ${{ steps.pr.outputs.number }} --approve --body "Approval at $(date -u)"
-          else
-            gh pr review ${{ steps.pr.outputs.number }} --comment --body "Review comment at $(date -u)"
-          fi
-
+          gh pr review ${{ steps.pr.outputs.number }} --comment --body "First review pass at $(date -u)"
           gh auth logout -h github.com -y || true
+
           echo "$ORIGINAL_GH_TOKEN" | gh auth login --with-token
           echo "GH_TOKEN=$ORIGINAL_GH_TOKEN" >> $GITHUB_ENV
 
-      - name: Maybe merge PR
+      - name: Pick approver secret name (can be same or different)
+        id: pick_approver
         if: steps.auth.outputs.skip != 'true' && steps.pr.outputs.number
         shell: bash
         run: |
-          # ~55% chance to merge
+          pool=$(jq -r 'map(select(. != "'${{ steps.pick.outputs.pat_secret }}'"))' <<< "${REVIEWER_CANDIDATES}")
+          chosen=""
+          for i in {1..10}; do
+            len=$(jq 'length' <<< "$pool"); [ "$len" -eq 0 ] && break
+            idx=$((RANDOM % len))
+            sec=$(jq -r ".[$idx]" <<< "$pool")
+            tok_var="S_${sec}"
+            tok="${!tok_var}"
+            if [ -n "$tok" ]; then chosen="$sec"; break; fi
+          done
+          # fallback to the reviewer if needed
+          if [ -z "$chosen" ] && [ -n "${{ steps.pick_reviewer.outputs.secret }}" ]; then
+            tok_var="S_${{ steps.pick_reviewer.outputs.secret }}"
+            tok="${!tok_var}"
+            [ -n "$tok" ] && chosen="${{ steps.pick_reviewer.outputs.secret }}"
+          fi
+          echo "secret=$chosen" >> $GITHUB_OUTPUT
+
+      - name: Wait, then maybe approve
+        if: steps.auth.outputs.skip != 'true' && steps.pr.outputs.number && steps.pick_approver.outputs.secret
+        shell: bash
+        run: |
+          # ~70% chance to approve after the delay; tune per repo
+          if [ $((RANDOM % 10)) -ge 7 ]; then
+            echo "Skipping approval this time."
+            exit 0
+          fi
+
+          mins=${{ steps.delays.outputs.approval_minutes }}
+          echo "Sleeping ${mins} minutes before approval..."
+          sleep $(( mins * 60 ))
+
+          tok_var="S_${{ steps.pick_approver.outputs.secret }}"
+          APPROVER_TOKEN="${!tok_var}"
+          if [ -z "$APPROVER_TOKEN" ]; then
+            echo "No approver token available; skipping approval."
+            exit 0
+          fi
+
+          ORIGINAL_GH_TOKEN="$GH_TOKEN"
+          unset GH_TOKEN
+
+          echo "$APPROVER_TOKEN" | gh auth login --with-token
+          gh pr review ${{ steps.pr.outputs.number }} --approve --body "Approval at $(date -u)"
+          gh auth logout -h github.com -y || true
+
+          echo "$ORIGINAL_GH_TOKEN" | gh auth login --with-token
+          echo "GH_TOKEN=$ORIGINAL_GH_TOKEN" >> $GITHUB_ENV
+
+      - name: Diagnose mergeability
+        if: steps.auth.outputs.skip != 'true' && steps.pr.outputs.number
+        shell: bash
+        run: |
+          gh pr view ${{ steps.pr.outputs.number }} \
+            --json state,mergeable,mergeStateStatus,reviewDecision,requiredApprovingReviewCount,baseRefName,isDraft \
+            -q '
+              "state=" + .state + "\n" +
+              "mergeable=" + (.mergeable|tostring) + "\n" +
+              "mergeStateStatus=" + .mergeStateStatus + "\n" +
+              "reviewDecision=" + (.reviewDecision|tostring) + "\n" +
+              "requiredApprovingReviewCount=" + (.requiredApprovingReviewCount|tostring) + "\n" +
+              "baseRefName=" + .baseRefName + "\n" +
+              "isDraft=" + (.isDraft|tostring)
+            '
+
+      - name: Maybe (auto) merge PR
+        if: steps.auth.outputs.skip != 'true' && steps.pr.outputs.number
+        shell: bash
+        run: |
+          # ~55% chance to request auto-merge for this repo
           if [ $((RANDOM % 20)) -lt 11 ]; then
             set +e
-            gh pr merge ${{ steps.pr.outputs.number }} --merge --delete-branch
+            gh pr merge ${{ steps.pr.outputs.number }} --merge --auto --delete-branch
             set -e
+          else
+            echo "Skipping merge attempt this run."
           fi
 
       - name: Maybe close without merge
