@@ -1,4 +1,4 @@
-name: Simulate Deploy to Cortex (Web - profile-service)
+name: Simulate Deploy to Cortex (Web team - profile-service)
 
 on:
   schedule:
