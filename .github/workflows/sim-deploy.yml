@@ -1,0 +1,71 @@
+name: Simulate Deploy to Cortex (Web - profile-service)
+
+on:
+  schedule:
+    - cron: "30 18 */2 * *"   # Every 2 days, 18:30 UTC
+  workflow_dispatch:
+    inputs:
+      force_type: { description: "DEPLOY|ROLLBACK|SCALE|RESTART", required: false, default: "" }
+      force_env:  { description: "staging|prod", required: false, default: "" }
+      title_suffix: { description: "Optional", required: false, default: "" }
+
+permissions:
+  contents: read
+
+jobs:
+  send-deploy:
+    runs-on: ubuntu-latest
+    env:
+      CORTEX_BASE_URL: https://api.getcortexapp.com
+      W_DEPLOY: 55
+      W_ROLLBACK: 20
+      W_SCALE: 15
+      W_RESTART: 10
+      ENV_PROD_PCT: 35
+      ACTORS: |
+        [
+          {"username":"chase","name":"Chase Lancaster","email":"chase.lancaster@cortex.io"},
+          {"username":"marion","name":"Marion Martorell","email":"marion.martorell@cortex.io"}
+        ]
+
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update -y && sudo apt-get install -y jq
+      - name: Pick
+        id: pick
+        shell: bash
+        run: |
+          idx=$((RANDOM % $(jq 'length' <<< "${ACTORS}"))); obj=$(jq -r ".[$idx]" <<< "${ACTORS}")
+          echo "username=$(jq -r '.username' <<< "$obj")" >> $GITHUB_OUTPUT
+          echo "name=$(jq -r '.name' <<< "$obj")"         >> $GITHUB_OUTPUT
+          echo "email=$(jq -r '.email' <<< "$obj")"       >> $GITHUB_OUTPUT
+      - name: Decide
+        id: decide
+        shell: bash
+        run: |
+          ft="${{ github.event.inputs.force_type }}"; [ -n "$ft" ] && TYPE="$ft" || {
+            r=$((RANDOM % 100)); d=${W_DEPLOY:-55}; rb=${W_ROLLBACK:-20}; sc=${W_SCALE:-15}
+            if   [ $r -lt $d ]; then TYPE="DEPLOY"
+            elif [ $r -lt $((d+rb)) ]; then TYPE="ROLLBACK"
+            elif [ $r -lt $((d+rb+sc)) ]; then TYPE="SCALE"
+            else TYPE="RESTART"; fi
+          }
+          fe="${{ github.event.inputs.force_env }}"; [ -n "$fe" ] && ENV="$fe" || { p=${ENV_PROD_PCT:-35}; r=$((RANDOM % 100)); [ $r -lt $p ] && ENV="prod" || ENV="staging"; }
+          if git rev-parse --verify HEAD >/dev/null 2>&1; then SHA="$(git rev-parse HEAD)"; else SHA="$(tr -dc 'a-f0-9' </dev/urandom | head -c 40)"; fi
+          SHORT="${SHA:0:7}"; suf="${{ github.event.inputs.title_suffix }}"; [ -n "$suf" ] && suf=" - $suf"; echo "type=$TYPE" >> $GITHUB_OUTPUT; echo "env=$ENV" >> $GITHUB_OUTPUT; echo "sha=$SHA" >> $GITHUB_OUTPUT; echo "title=${TYPE^} ${SHORT} to ${ENV}${suf}" >> $GITHUB_OUTPUT
+      - name: Payload
+        id: payload
+        shell: bash
+        run: |
+          now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"; run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          jq -n --arg ts "$now" --arg t "${{ steps.decide.outputs.type }}" --arg e "${{ steps.decide.outputs.env }}" --arg s "${{ steps.decide.outputs.sha }}" --arg ti "${{ steps.decide.outputs.title }}" --arg url "$run_url" --arg u "${{ steps.pick.outputs.username }}" --arg n "${{ steps.pick.outputs.name }}" --arg m "${{ steps.pick.outputs.email }}" \
+            '{timestamp:$ts,type:$t,environment:$e,sha:$s,title:$ti,url:$url,deployer:{username:$u,name:$n,email:$m},customData:{source:"gh-actions"}}' > payload.json
+          echo "tag=${GITHUB_REPOSITORY##*/}" >> $GITHUB_OUTPUT
+      - name: Send
+        env: { TOKEN: ${{ secrets.CORTEX_API_TOKEN }}, CORTEX_BASE_URL: https://api.getcortexapp.com }
+        shell: bash
+        run: |
+          [ -z "$TOKEN" ] && { echo "Missing CORTEX_API_TOKEN"; exit 1; }
+          URL="${CORTEX_BASE_URL}/api/v1/catalog/${{ steps.payload.outputs.tag }}/deploys"
+          code=$(curl -sS -o resp.json -w "%{http_code}" -X POST "$URL" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" --data @payload.json)
+          echo "Response: $code"; cat resp.json || true; case "$code" in 2*) exit 0;; *) exit 1;; esac
