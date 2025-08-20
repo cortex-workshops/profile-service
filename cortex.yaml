@@ -14,3 +14,7 @@ info:
     github:
       alias: cortex
       repository: cortex-workshops/profile-service
+  x-cortex-issues:
+    jira:
+      labels:
+        - name: web
