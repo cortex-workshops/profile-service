@@ -1,7 +1,7 @@
 openapi: 3.0.0
 info:
   title: Profile Service
-  description: Manages user profiles, preferences, and account settings
+  description: Manages user profiles, preferences, and account settings.
   x-cortex-tag: profile-service
   x-cortex-type: service
   x-cortex-groups:
