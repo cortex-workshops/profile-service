@@ -39,7 +39,7 @@ jobs:
 
       # --- Org-wide reviewer pool (we'll avoid the actor's own token) ---
       REVIEWER_CANDIDATES: |
-        ["PAT_TAYLOR","PAT_CATHLEEN","PAT_SALLY","PAT_JEFF","PAT_STEPH","PAT_CHASE","PAT_MARION","PAT_ROSHNI","PAT_GIANPAUL","PAT_BECKA"]
+        ["PAT_TAYLOR","PAT_JEFF","PAT_STEPH","PAT_CHASE","PAT_BECKA"]
 
       # --- Delay tuning (minutes) for non-zero time-to-first-review/approval ---
       FIRST_REVIEW_MIN: "10"
