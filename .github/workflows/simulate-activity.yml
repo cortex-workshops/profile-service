@@ -138,7 +138,7 @@ jobs:
 
           # Sometimes reuse a previous sim branch to create multi-run timelines
           if [ $((RANDOM % 10)) -lt 3 ]; then
-            existing=$(git ls-remote --heads origin "sim/${{ steps.pick.outputs.username }}-*" | head -n1 | awk '{print $2}' | cut -d/ -f3-)
+            existing=$(set +o pipefail; git ls-remote --heads origin "sim/${{ steps.pick.outputs.username }}-*" | head -n1 | awk '{print $2}' | cut -d/ -f3-)
             if [ -n "$existing" ]; then
               git fetch origin "$existing"
               git checkout -b "$existing" "origin/$existing"
@@ -175,7 +175,7 @@ jobs:
         if: steps.auth.outputs.skip != 'true'
         shell: bash
         run: |
-          if [ $((RANDOM % 10)) -lt 7 ]; then
+          if [ $((RANDOM % 10)) -lt 9 ]; then
             URL=$(gh pr create \
               --title "Sim PR by ${AUTHOR}" \
               --body "Automated demo PR at $(date -u). Scenario: ${{ steps.scenario.outputs.value }}" \
