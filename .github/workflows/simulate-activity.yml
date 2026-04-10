@@ -138,7 +138,9 @@ jobs:
 
           # Sometimes reuse a previous sim branch to create multi-run timelines
           if [ $((RANDOM % 10)) -lt 3 ]; then
-            existing=$(set +o pipefail; git ls-remote --heads origin "sim/${{ steps.pick.outputs.username }}-*" | head -n1 | awk '{print $2}' | cut -d/ -f3-)
+            set +o pipefail
+            existing=$(git ls-remote --heads origin "sim/${{ steps.pick.outputs.username }}-*" | head -n1 | awk '{print $2}' | cut -d/ -f3-)
+            set -o pipefail
             if [ -n "$existing" ]; then
               git fetch origin "$existing"
               git checkout -b "$existing" "origin/$existing"
@@ -179,8 +181,17 @@ jobs:
             URL=$(gh pr create \
               --title "Sim PR by ${AUTHOR}" \
               --body "Automated demo PR at $(date -u). Scenario: ${{ steps.scenario.outputs.value }}" \
-              --base main --head "${BRANCH}" --draft=false 2>&1) || echo "PR create failed: $URL"
-            echo "url=$URL" >> $GITHUB_OUTPUT
+              --base main --head "${BRANCH}" --draft=false 2>&1) || true
+            # If branch already has a PR, extract that URL instead
+            if echo "$URL" | grep -q "already exists"; then
+              URL=$(echo "$URL" | grep -o 'https://github.com[^ ]*')
+            fi
+            # Only write to output if we got a valid URL
+            if echo "$URL" | grep -q "https://"; then
+              echo "url=$URL" >> $GITHUB_OUTPUT
+            else
+              echo "PR create failed or skipped: $URL"
+            fi
           fi
 
       - name: Find an open PR to act on
