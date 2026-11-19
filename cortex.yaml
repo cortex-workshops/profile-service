@@ -18,3 +18,7 @@ info:
     jira:
       labels:
         - name: web
+  x-cortex-apm:
+    sentry:
+      projects:
+        - name: profile-service
